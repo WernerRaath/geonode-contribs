@@ -100,6 +100,7 @@ def group_identifier_split(identifier):
     return identifier.split('_')[1]
 
 def sync_users(group_descriptions = []):
+    summary = {}
     kc_group_members = []
     for group_description in group_descriptions:
         group_members = get_group_members(group_identifier_split(group_description))
@@ -162,6 +163,14 @@ def sync_users(group_descriptions = []):
             else:
                 logger.warning(f'Group Allocation: Profile does not exists for ID: {kcu["id"]}')
 
+    keycloak_social_app = SocialApp.objects.filter(provider='keycloak').first()
+    if keycloak_social_app is None:
+        key = settings.KEYCLOAK_CLIENT_SECRET
+        if not key:
+            raise Exception('No value set for "KEYCLOAK_CLIENT_SECRET", please check your settings.py file')
+        keycloak_social_app = SocialApp(provider='keycloak', name='Keycloak', client_id=settings.KEYCLOAK_CLIENT, key=key)
+        keycloak_social_app.save()
+    
     for kcu in kc_accounts:
         uid = kcu['id']
         username = kcu['username']
@@ -203,14 +212,6 @@ def sync_users(group_descriptions = []):
     if settings.USE_ID_AS_SOCIAL_TOKEN:
         new_social_tokens = []
         updated_social_tokens = []
-
-        keycloak_social_app = SocialApp.objects.filter(provider='keycloak').first()
-        if keycloak_social_app is None:
-            key = settings.KEYCLOAK_CLIENT_SECRET
-            if not key:
-                raise Exception('No value set for "KEYCLOAK_CLIENT_SECRET", please check your settings.py file')
-            keycloak_social_app = SocialApp(provider='keycloak', name='Keycloak', client_id=settings.KEYCLOAK_CLIENT, key=key)
-            keycloak_social_app.save()
         for sa in list(new_social_accounts) + updated_social_accounts:
             st = SocialToken.objects.filter(app=keycloak_social_app, account=sa).first()
             isNew = st is None
@@ -222,25 +223,36 @@ def sync_users(group_descriptions = []):
             else:
                 updated_social_tokens.append(st)
         
+        delete_social_tokens = SocialToken.objects.filter(app=keycloak_social_app).filter(~Q(token__in=[kcu['id'] for kcu in kc_accounts]))
+        deleted_social_tokens = list(delete_social_tokens)
+
+        logging.info(f'Keycloak User SocialToken Bulk Delete initiated')
+        delete_social_tokens.delete()
+
         logging.info(f'Keycloak User SocialToken Bulk Create initiated')
         SocialToken.objects.bulk_create(new_social_tokens)
         logging.info(f'Keycloak User Profile Bulk Update initiated')
         SocialToken.objects.bulk_update(updated_social_tokens, ['expires_at'])
+        summary["social_tokens"] = {
+            "new": new_social_tokens,
+            "updated": updated_social_tokens,
+            "deleted": deleted_social_tokens
+        }
 
     logging.info(f'Keycloak User sync summary: {len(new_profiles)} New, {len(existing_social_account_ids)} Updated, {len(deleted_social_accounts)} Deleted, {len(SocialAccount.objects.filter(provider="keycloak"))} Total')
 
-    return {
-        "profiles": {
-            "new": new_profiles,
-            "updated": updated_profiles,
-            "deleted": deleted_profiles
-        },
-        "social_accounts": {
-            "new": new_social_accounts,
-            "updated": updated_social_accounts,
-            "deleted": deleted_social_accounts
-        }
+    summary["profiles"] = {
+        "new": new_profiles,
+        "updated": updated_profiles,
+        "deleted": deleted_profiles
     }
+    summary["social_accounts"] = {
+        "new": new_social_accounts,
+        "updated": updated_social_accounts,
+        "deleted": deleted_social_accounts
+    }
+
+    return summary
 
 # sync_groups fetches groups from KeyCloak,
 # flattens their tree structure,

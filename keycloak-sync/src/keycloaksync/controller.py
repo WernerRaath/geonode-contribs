@@ -8,6 +8,7 @@ if __name__ == '__main__':
     execute_from_command_line(['manage.py', 'migrate'])
 
 import json, logging
+import datetime as dt
 import requests
 
 from django.db.models import Q
@@ -18,7 +19,7 @@ from geonode.groups.models import GroupProfile
 from django.contrib.auth.models import Group
 
 from geonode.people.models import Profile
-from allauth.socialaccount.models import SocialAccount
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)-8s [%(filename)s:%(lineno)d] %(message)s', datefmt='%d-%b-%y %H:%M:%S') 
 logger = logging.getLogger(__name__)
@@ -198,6 +199,33 @@ def sync_users(group_descriptions = []):
 
     logging.info(f'Keycloak User Profile Bulk Update initiated')
     Profile.objects.bulk_update(updated_profiles, ['email', 'first_name', 'last_name'])
+
+    if settings.USE_ID_AS_SOCIAL_TOKEN:
+        new_social_tokens = []
+        updated_social_tokens = []
+
+        keycloak_social_app = SocialApp.objects.filter(provider='keycloak').first()
+        if keycloak_social_app is None:
+            key = settings.KEYCLOAK_CLIENT_SECRET
+            if not key:
+                raise Exception('No value set for "KEYCLOAK_CLIENT_SECRET", please check your settings.py file')
+            keycloak_social_app = SocialApp(provider='keycloak', name='Keycloak', client_id=settings.KEYCLOAK_CLIENT, key=key)
+            keycloak_social_app.save()
+        for sa in list(new_social_accounts) + updated_social_accounts:
+            st = SocialToken.objects.filter(app=keycloak_social_app, account=sa).first()
+            isNew = st is None
+            if isNew:
+                st = SocialToken(app=keycloak_social_app, account=sa, token=sa.uid)
+            st.expires_at = dt.datetime.now() + dt.timedelta(days=366)
+            if isNew:
+                new_social_tokens.append(st)
+            else:
+                updated_social_tokens.append(st)
+        
+        logging.info(f'Keycloak User SocialToken Bulk Create initiated')
+        SocialToken.objects.bulk_create(new_social_tokens)
+        logging.info(f'Keycloak User Profile Bulk Update initiated')
+        SocialToken.objects.bulk_update(updated_social_tokens, ['expires_at'])
 
     logging.info(f'Keycloak User sync summary: {len(new_profiles)} New, {len(existing_social_account_ids)} Updated, {len(deleted_social_accounts)} Deleted, {len(SocialAccount.objects.filter(provider="keycloak"))} Total')
 

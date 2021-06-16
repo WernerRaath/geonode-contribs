@@ -6,6 +6,7 @@ KEYCLOAK_REALM=os.getenv('KEYCLOAK_REALM', None)
 KEYCLOAK_USER=os.getenv('KEYCLOAK_USER', None)
 KEYCLOAK_PASSWORD=os.getenv('KEYCLOAK_PASSWORD', None)
 KEYCLOAK_USER_REALM=os.getenv('KEYCLOAK_USER_REALM', None)
+USE_ID_AS_SOCIAL_TOKEN=os.getenv('USE_ID_AS_SOCIAL_TOKEN', 'false').lower() == 'true'
 
 if 'keycloaksync' not in INSTALLED_APPS:
     INSTALLED_APPS += ('keycloaksync',)

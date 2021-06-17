@@ -7,7 +7,7 @@ if __name__ == '__main__':
 
     execute_from_command_line(['manage.py', 'migrate'])
 
-import json, logging
+import json, logging, re
 import datetime as dt
 import requests
 
@@ -15,7 +15,7 @@ from django.db.models import Q
 from django.conf import settings
 from django.core import serializers
 
-from geonode.groups.models import GroupProfile
+from geonode.groups.models import GroupProfile, GroupCategory
 from django.contrib.auth.models import Group
 
 from geonode.people.models import Profile
@@ -96,16 +96,24 @@ def flatten_groups(groups, parent_id=None):
     return flattened
 
 def group_identifier(group):
-    return f"keycloak_{group['id']}_{group['name']}"
+    name = re.sub('[^a-zA-Z0-9 \n\.]', '-', group['name']).replace(' ', '-')
+    name = re.sub(r'(-)+', r'\1', name)
+    tag = f"keycloak_{group['id']}_{name}"
+    return tag
 
-def group_identifier_split(identifier):
+def group_identifier_extract_id(identifier):
     return identifier.split('_')[1]
 
-def sync_users(group_descriptions = []):
+def username_wrapper(username):
+    if username == 'admin':
+        username = 'keycloak_admin'
+    return username
+
+def sync_users(group_slugs = []):
     summary = {}
     kc_group_members = []
-    for group_description in group_descriptions:
-        group_members = get_group_members(group_identifier_split(group_description))
+    for group_description in group_slugs:
+        group_members = get_group_members(group_identifier_extract_id(group_description))
         kc_group_members += [{'group': group_description, 'user': gm['id']} for gm in group_members]
     
     kc_users = get_users()
@@ -122,7 +130,7 @@ def sync_users(group_descriptions = []):
     updated_social_accounts = []
     for kcu in kc_accounts:
         uid = kcu['id']
-        username = kcu['username']
+        username = username_wrapper(kcu['username'])
         email = kcu.get('email', '')
         firstName = kcu.get('firstName', '')
         lastName = kcu.get('lastName', '')
@@ -156,10 +164,11 @@ def sync_users(group_descriptions = []):
     
     logging.info(f'Keycloak User Profile Group Assign initiated')
     for kcu in kc_accounts:
-        if len(group_descriptions):
+        if len(group_slugs):
             group_names = [kc['group'] for kc in kc_group_members if kc['user'] == kcu['id']]
             groups = Group.objects.filter(name__in=group_names)
-            profile = Profile.objects.filter(username=kcu['username']).first()
+            sername = username_wrapper(kcu['username'])
+            profile = Profile.objects.filter(username=username).first()
             if profile:
                 profile.groups.set(groups)
             else:
@@ -167,12 +176,12 @@ def sync_users(group_descriptions = []):
     
     for kcu in kc_accounts:
         uid = kcu['id']
-        username = kcu['username']
+        username = username_wrapper(kcu['username'])
         extra_data = {
             "email_verified": kcu.get('emailVerified', False),
             "name": kcu.get('firstName', ''),
             "groups": kcu.get('groups', []),
-            "preferred_username": kcu.get('username', ''),
+            "preferred_username": username,
             "given_name": f"{kcu.get('firstName', '')} {kcu.get('lastName', '')}",
             "email": kcu.get('email', ''),
             "id": kcu.get('id', '')
@@ -265,18 +274,19 @@ def sync_groups():
 
     group_ids = [group_identifier(kcu) for kcu in kc_groups]
 
-    GroupProfiles = GroupProfile.objects.filter(description__startswith='keycloak_')
+    GroupProfiles = GroupProfile.objects.filter(slug__startswith='keycloak_')
     Groups = Group.objects.filter(name__startswith='keycloak_')
     
-    existing_group_profiles = GroupProfiles.filter(description__in=group_ids)
-    existing_group_profile_ids = [sa.description for sa in existing_group_profiles]
+    existing_group_profiles = GroupProfiles.filter(slug__in=group_ids)
+    existing_group_profile_ids = [sa.slug for sa in existing_group_profiles]
 
-    # updated_groups = []
     new_groups = []
     new_group_profiles = []
 
     for kcu in kc_groups:
+        logging.info(kcu)
         uid = group_identifier(kcu)
+        logging.info(uid)
         group = Groups.filter(name=uid).first()
         if not group:
             group = Group(
@@ -284,7 +294,7 @@ def sync_groups():
             )
             new_groups.append(group)
     
-    delete_group_profiles = GroupProfiles.filter(~Q(description__in=group_ids))
+    delete_group_profiles = GroupProfiles.filter(~Q(slug__in=group_ids))
     delete_groups = Groups.filter(~Q(name__in=group_ids))
 
     logging.info(f'Keycloak Group Bulk Delete initiated')
@@ -296,15 +306,17 @@ def sync_groups():
     new_groups = Group.objects.filter(name__in=[g.name for g in new_groups])
 
     for kcu in kc_groups:
-        description = group_identifier(kcu)
+        group_id = group_identifier(kcu)
         title = kcu.get('path', None)
-        if description not in existing_group_profile_ids:
-            group = Groups.filter(name=description).first()
+        name = kcu.get('name', None)
+        if group_id not in existing_group_profile_ids:
+            group = Groups.filter(name=group_id).first()
             social_account = GroupProfile(
-                title=title,
-                slug=title,
-                description=description,
-                group=group
+                title=name,
+                slug=group_id,
+                description=title,
+                group=group,
+                access='private'
             )
             new_group_profiles.append(social_account)
 
@@ -314,10 +326,11 @@ def sync_groups():
 
     logging.info(f'Keycloak GroupProfile Bulk Create initiated')
     GroupProfile.objects.bulk_create(new_group_profiles)
-    new_group_profiles = GroupProfile.objects.filter(description__in=[gp.description for gp in new_group_profiles])
-
-    # logging.info(f'Keycloak User Group Bulk Update initiated')
-    # Group.objects.bulk_update(updated_groups, ['name'])
+    new_group_profiles = GroupProfile.objects.filter(slug__in=[gp.slug for gp in new_group_profiles])
+    
+    keycloak_group_category, _ = GroupCategory.objects.get_or_create(name='keycloak', description='GroupProfile created by "keycloaksync" module')
+    for ngp in new_group_profiles:
+        ngp.categories.add(keycloak_group_category)
 
     logging.info(f'Keycloak Group sync summary: {len(new_group_profiles)} New, {len(existing_group_profiles)} Updated, {len(deleted_group_profiles)} Deleted, {len(GroupProfile.objects.filter(description__startswith="keycloak_"))} Total')
     return {
@@ -334,10 +347,10 @@ def sync_groups():
 
 def sync_all():
     group_summary = sync_groups()
-    group_descriptions = []
+    group_slugs = []
     for crud_key in group_summary['group_profiles']:
-        group_descriptions += [gs.description for gs in group_summary['group_profiles'][crud_key] ]
-    user_summary = sync_users(group_descriptions)
+        group_slugs += [gs.slug for gs in group_summary['group_profiles'][crud_key] ]
+    user_summary = sync_users(group_slugs)
 
     full_summary = {**group_summary, **user_summary}
 

@@ -112,9 +112,9 @@ def username_wrapper(username):
 def sync_users(group_slugs = []):
     summary = {}
     kc_group_members = []
-    for group_description in group_slugs:
-        group_members = get_group_members(group_identifier_extract_id(group_description))
-        kc_group_members += [{'group': group_description, 'user': gm['id']} for gm in group_members]
+    for group_slug in group_slugs:
+        group_members = get_group_members(group_identifier_extract_id(group_slug))
+        kc_group_members += [{'group': group_slug, 'user': gm['id']} for gm in group_members]
     
     kc_users = get_users()
     kc_accounts = [kcu for kcu in kc_users if kcu['enabled']]
@@ -167,7 +167,7 @@ def sync_users(group_slugs = []):
         if len(group_slugs):
             group_names = [kc['group'] for kc in kc_group_members if kc['user'] == kcu['id']]
             groups = Group.objects.filter(name__in=group_names)
-            sername = username_wrapper(kcu['username'])
+            username = username_wrapper(kcu['username'])
             profile = Profile.objects.filter(username=username).first()
             if profile:
                 profile.groups.set(groups)
@@ -284,9 +284,7 @@ def sync_groups():
     new_group_profiles = []
 
     for kcu in kc_groups:
-        logging.info(kcu)
         uid = group_identifier(kcu)
-        logging.info(uid)
         group = Groups.filter(name=uid).first()
         if not group:
             group = Group(

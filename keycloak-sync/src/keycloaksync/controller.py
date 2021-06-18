@@ -15,7 +15,7 @@ from django.db.models import Q
 from django.conf import settings
 from django.core import serializers
 
-from geonode.groups.models import GroupProfile, GroupCategory
+from geonode.groups.models import GroupProfile, GroupCategory, GroupMember
 from django.contrib.auth.models import Group
 
 from geonode.people.models import Profile
@@ -161,18 +161,44 @@ def sync_users(group_slugs = []):
     logging.info(f'Keycloak User Profile Bulk Create initiated')
     Profile.objects.bulk_create(new_profiles)
     new_profiles = Profile.objects.filter(username__in=[p.username for p in new_profiles])
-    
-    logging.info(f'Keycloak User Profile Group Assign initiated')
-    for kcu in kc_accounts:
-        if len(group_slugs):
-            group_names = [kc['group'] for kc in kc_group_members if kc['user'] == kcu['id']]
-            groups = Group.objects.filter(name__in=group_names)
+    if not len(group_slugs):
+        logging.info(f'Keycloak User Profile Group Assign SKIPPED')
+    else:
+        logging.info(f'Keycloak User Profile Group Assign initiated')
+        new_group_members = []
+        delete_group_members = []
+        for kcu in kc_accounts:
             username = username_wrapper(kcu['username'])
             profile = Profile.objects.filter(username=username).first()
             if profile:
+                group_names = [kc['group'] for kc in kc_group_members if kc['user'] == kcu['id']]
+                groups = Group.objects.filter(name__in=group_names)
                 profile.groups.set(groups)
+
+                profile_group_members = GroupMember.objects.filter(user=profile)
+                delete_group_members.append(profile_group_members.filter(~Q(group__slug__in=group_names)))
+                
+                group_profiles = GroupProfile.objects.filter(slug__in=group_names)
+                for gp in group_profiles:
+                    gm = GroupMember.objects.filter(user=profile, group=gp).first()
+                    if not gm:
+                        gm = GroupMember(user=profile, group=gp, role='member')
+                        new_group_members.append(gm)
             else:
                 logger.warning(f'Group Allocation: Profile does not exists for ID: {kcu["id"]}')
+        
+        logging.info(f'Keycloak Group Member Bulk Create initiated')
+        GroupMember.objects.bulk_create(new_group_members)
+        logging.info(f'Keycloak Group Member Bulk Delete initiated')
+        deleted_group_members = []
+        for dgm in delete_group_members:
+            deleted_group_members += list(dgm)
+            dgm.delete()
+        
+        summary["group_members"] = {
+            "new": new_group_members,
+            "deleted": deleted_group_members
+        }
     
     for kcu in kc_accounts:
         uid = kcu['id']
@@ -200,9 +226,6 @@ def sync_users(group_slugs = []):
             social_account.extra_data = extra_data
             updated_social_accounts.append(social_account)
 
-    # logging.info(f'Keycloak User SocialAccount Bulk Delete initiated')
-    # delete_social_accounts.delete()
-
     logging.info(f'Keycloak User SocialAccount Bulk Create initiated')
     SocialAccount.objects.bulk_create(new_social_accounts)
     new_social_accounts = SocialAccount.objects.filter(uid__in=[sa.uid for sa in new_social_accounts])
@@ -211,7 +234,6 @@ def sync_users(group_slugs = []):
 
     logging.info(f'Keycloak User Profile Bulk Update initiated')
     Profile.objects.bulk_update(updated_profiles, ['email', 'first_name', 'last_name'])
-
 
     geoserver_application = Application.objects.filter(name='GeoServer').first()
     if geoserver_application is None:
